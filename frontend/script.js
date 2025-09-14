@@ -1,5 +1,5 @@
 ﻿// Backend API URL (replace with your Render URL)
-const API_URL = 'https://your-render-app.onrender.com';
+const API_URL = 'https://ds-qr.onrender.com';
 
 // Show notification
 function showNotification(message, isError = false) {
@@ -105,3 +105,4 @@ function checkUrlForEventId() {
 window.onload = function() {
     checkUrlForEventId();
 };
+
