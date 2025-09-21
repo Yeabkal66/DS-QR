@@ -18,22 +18,79 @@ const bot = new TelegramBot(token, { polling: false });
 const events = new Map();
 const userStates = new Map();
 
-// Webhook handler
+// Webhook handler - FIXED: Removed handleCommand reference
 app.post('/webhook', async (req, res) => {
   try {
     const update = req.body;
+    console.log('Webhook received:', JSON.stringify(update));
     
     if (update.message) {
       const chatId = update.message.chat.id;
       const text = update.message.text || '';
       
-      // Handle commands
+      // Handle commands directly
       if (text.startsWith('/')) {
-        await handleCommand(chatId, text);
+        if (text === '/start' || text === '/start@yourbottoken') {
+          // Create new event
+          const eventId = 'event-' + Date.now();
+          events.set(eventId, { media: [], createdAt: new Date() });
+          userStates.set(chatId, { eventId, state: 'awaiting_media' });
+          
+          await bot.sendMessage(chatId, `🎉 New event created! 
+Event ID: ${eventId}
+Send me photos and videos now. When you're done, send /done to get your shareable link.`);
+        } 
+        else if (text === '/done' || text === '/done@yourbottoken') {
+          const userState = userStates.get(chatId);
+          
+          if (!userState || !userState.eventId) {
+            await bot.sendMessage(chatId, 'Please start an event first with /start');
+          } else {
+            const eventData = events.get(userState.eventId);
+            const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
+            
+            await bot.sendMessage(chatId, `✅ Your event is ready!
+Share this link with your guests: ${eventLink}
+They'll be able to view all ${eventData.media.length} media items.`);
+            
+            userStates.delete(chatId);
+          }
+        }
+        else if (text === '/help' || text === '/help@yourbottoken') {
+          await bot.sendMessage(chatId, `🤖 Event Media Bot Help:
+/start - Create a new event
+/done - Finish uploading and get your shareable link
+/help - Show this help message
+
+Simply send photos or videos after starting an event, and they'll be added to your gallery automatically.`);
+        }
       } 
-      // Handle media - STORE ONLY FILE ID, NOT THE FILE
+      // Handle media
       else if (update.message.photo || update.message.video) {
-        await handleMedia(chatId, update.message);
+        const userState = userStates.get(chatId);
+        
+        if (!userState) {
+          await bot.sendMessage(chatId, 'Please start an event first with /start');
+        } else {
+          const eventData = events.get(userState.eventId);
+          let fileId;
+          
+          if (update.message.photo) {
+            fileId = update.message.photo[update.message.photo.length - 1].file_id;
+          } else if (update.message.video) {
+            fileId = update.message.video.file_id;
+          }
+          
+          if (fileId) {
+            eventData.media.push({
+              file_id: fileId,
+              type: update.message.photo ? 'photo' : 'video',
+              timestamp: new Date()
+            });
+            
+            await bot.sendMessage(chatId, `✅ Media added to your event!`);
+          }
+        }
       }
     }
     
@@ -42,64 +99,6 @@ app.post('/webhook', async (req, res) => {
     console.error('Webhook error:', error);
     res.sendStatus(200);
   }
-});
-
-// Handle /start command
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const eventId = 'event-' + Date.now();
-  events.set(eventId, { media: [], createdAt: new Date() });
-  userStates.set(chatId, { eventId, state: 'awaiting_media' });
-  
-  await bot.sendMessage(chatId, `🎉 New event created! 
-Event ID: ${eventId}
-Send me photos and videos now. When you're done, send /done to get your shareable link.`);
-});
-
-// Handle media - STORE ONLY FILE ID
-bot.on('message', async (msg) => {
-  if (msg.photo || msg.video) {
-    const chatId = msg.chat.id;
-    const userState = userStates.get(chatId);
-    
-    if (!userState) return;
-    
-    const eventData = events.get(userState.eventId);
-    let fileId;
-    
-    if (msg.photo) {
-      fileId = msg.photo[msg.photo.length - 1].file_id;
-    } else if (msg.video) {
-      fileId = msg.video.file_id;
-    }
-    
-    if (fileId) {
-      eventData.media.push({
-        file_id: fileId,
-        type: msg.photo ? 'photo' : 'video',
-        timestamp: new Date()
-      });
-      
-      await bot.sendMessage(chatId, `✅ Media added to your event!`);
-    }
-  }
-});
-
-// Handle /done command
-bot.onText(/\/done/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userState = userStates.get(chatId);
-  
-  if (!userState) return;
-  
-  const eventData = events.get(userState.eventId);
-  const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
-  
-  await bot.sendMessage(chatId, `✅ Your event is ready!
-Share this link with your guests: ${eventLink}
-They'll be able to view all ${eventData.media.length} media items.`);
-  
-  userStates.delete(chatId);
 });
 
 // API to get event media - GENERATE FRESH LINKS EACH TIME
@@ -119,7 +118,7 @@ app.get('/api/event/:eventId', async (req, res) => {
           const fileLink = await bot.getFileLink(item.file_id);
           return {
             type: item.type,
-            file_path: fileLink.href, // Fresh link that won't 404
+            file_path: fileLink.href,
             timestamp: item.timestamp
           };
         } catch (error) {
@@ -151,6 +150,17 @@ app.get('/', (req, res) => {
     message: 'Server is running',
     events: events.size
   });
+});
+
+// Set webhook route
+app.post('/set-webhook', async (req, res) => {
+  try {
+    const webhookUrl = `${process.env.RENDER_URL}/webhook`;
+    await bot.setWebHook(webhookUrl);
+    res.json({ success: true, message: `Webhook set to ${webhookUrl}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Start server
