@@ -14,22 +14,11 @@ app.use(express.json());
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: false });
 
-// In-memory storage (use a database in production)
+// In-memory storage (only store file IDs, not files!)
 const events = new Map();
 const userStates = new Map();
 
-// Set webhook route
-app.post('/set-webhook', async (req, res) => {
-  try {
-    const webhookUrl = `${process.env.RENDER_URL}/webhook`;
-    await bot.setWebHook(webhookUrl);
-    res.json({ success: true, message: `Webhook set to ${webhookUrl}` });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Webhook handler (Telegram will send updates here)
+// Webhook handler
 app.post('/webhook', async (req, res) => {
   try {
     const update = req.body;
@@ -37,13 +26,12 @@ app.post('/webhook', async (req, res) => {
     if (update.message) {
       const chatId = update.message.chat.id;
       const text = update.message.text || '';
-      const messageId = update.message.message_id;
       
       // Handle commands
       if (text.startsWith('/')) {
         await handleCommand(chatId, text);
       } 
-      // Handle media
+      // Handle media - STORE ONLY FILE ID, NOT THE FILE
       else if (update.message.photo || update.message.video) {
         await handleMedia(chatId, update.message);
       }
@@ -52,122 +40,115 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
   } catch (error) {
     console.error('Webhook error:', error);
-    res.sendStatus(200); // Always acknowledge webhook to prevent retries
+    res.sendStatus(200);
   }
 });
 
-// Handle bot commands
-async function handleCommand(chatId, command) {
-  try {
-    if (command === '/start' || command === '/start@yourbottoken') {
-      // Create new event
-      const eventId = 'event-' + Date.now();
-      events.set(eventId, { media: [], createdAt: new Date() });
-      userStates.set(chatId, { eventId, state: 'awaiting_media' });
-      
-      await bot.sendMessage(chatId, `🎉 New event created! 
+// Handle /start command
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const eventId = 'event-' + Date.now();
+  events.set(eventId, { media: [], createdAt: new Date() });
+  userStates.set(chatId, { eventId, state: 'awaiting_media' });
+  
+  await bot.sendMessage(chatId, `🎉 New event created! 
 Event ID: ${eventId}
 Send me photos and videos now. When you're done, send /done to get your shareable link.`);
-    } 
-    else if (command === '/done' || command === '/done@yourbottoken') {
-      const userState = userStates.get(chatId);
-      
-      if (!userState || !userState.eventId) {
-        await bot.sendMessage(chatId, 'Please start an event first with /start');
-        return;
-      }
-      
-      const eventData = events.get(userState.eventId);
-      const eventLink = `${process.env.FRONTEND_URL}/gallery.html?event=${userState.eventId}`;
-      
-      await bot.sendMessage(chatId, `✅ Your event is ready!
-Share this link with your guests: ${eventLink}
+});
 
-They'll be able to view all ${eventData.media.length} media items you've uploaded.`);
-      
-      // Reset user state
-      userStates.delete(chatId);
-    }
-    else if (command === '/help' || command === '/help@yourbottoken') {
-      await bot.sendMessage(chatId, `🤖 Event Media Bot Help:
-/start - Create a new event
-/done - Finish uploading and get your shareable link
-/help - Show this help message
-
-Simply send photos or videos after starting an event, and they'll be added to your gallery automatically.`);
-    }
-  } catch (error) {
-    console.error('Command handling error:', error);
-    await bot.sendMessage(chatId, 'Sorry, something went wrong. Please try again.');
-  }
-}
-
-// Handle media messages
-async function handleMedia(chatId, message) {
-  try {
+// Handle media - STORE ONLY FILE ID
+bot.on('message', async (msg) => {
+  if (msg.photo || msg.video) {
+    const chatId = msg.chat.id;
     const userState = userStates.get(chatId);
     
-    if (!userState || userState.state !== 'awaiting_media') {
-      await bot.sendMessage(chatId, 'Please start an event first with /start');
-      return;
-    }
+    if (!userState) return;
     
     const eventData = events.get(userState.eventId);
-    let mediaInfo;
+    let fileId;
     
-    if (message.photo) {
-      // Get the highest resolution photo
-      const photo = message.photo[message.photo.length - 1];
-      const fileLink = await bot.getFileLink(photo.file_id);
-      
-      mediaInfo = {
-        type: 'photo',
-        file_id: photo.file_id,
-        file_path: fileLink.href,
-        timestamp: new Date()
-      };
-    } 
-    else if (message.video) {
-      const fileLink = await bot.getFileLink(message.video.file_id);
-      
-      mediaInfo = {
-        type: 'video',
-        file_id: message.video.file_id,
-        file_path: fileLink.href,
-        timestamp: new Date()
-      };
+    if (msg.photo) {
+      fileId = msg.photo[msg.photo.length - 1].file_id;
+    } else if (msg.video) {
+      fileId = msg.video.file_id;
     }
     
-    if (mediaInfo) {
-      eventData.media.push(mediaInfo);
-      events.set(userState.eventId, eventData);
+    if (fileId) {
+      eventData.media.push({
+        file_id: fileId,
+        type: msg.photo ? 'photo' : 'video',
+        timestamp: new Date()
+      });
       
-      await bot.sendMessage(chatId, `✅ ${mediaInfo.type === 'photo' ? 'Photo' : 'Video'} added to your event!
-Send more media or /done when finished.`);
+      await bot.sendMessage(chatId, `✅ Media added to your event!`);
     }
-  } catch (error) {
-    console.error('Media handling error:', error);
-    await bot.sendMessage(chatId, 'Sorry, I couldn\'t process that media. Please try again.');
   }
-}
+});
 
-// API to get event media
-app.get('/api/event/:eventId', (req, res) => {
-  const { eventId } = req.params;
-  const eventData = events.get(eventId);
+// Handle /done command
+bot.onText(/\/done/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userState = userStates.get(chatId);
   
-  if (!eventData) {
-    return res.status(404).json({ error: 'Event not found' });
+  if (!userState) return;
+  
+  const eventData = events.get(userState.eventId);
+  const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
+  
+  await bot.sendMessage(chatId, `✅ Your event is ready!
+Share this link with your guests: ${eventLink}
+They'll be able to view all ${eventData.media.length} media items.`);
+  
+  userStates.delete(chatId);
+});
+
+// API to get event media - GENERATE FRESH LINKS EACH TIME
+app.get('/api/event/:eventId', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const eventData = events.get(eventId);
+    
+    if (!eventData) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    
+    // Generate fresh download links for each media item
+    const mediaWithFreshLinks = await Promise.all(
+      eventData.media.map(async (item) => {
+        try {
+          const fileLink = await bot.getFileLink(item.file_id);
+          return {
+            type: item.type,
+            file_path: fileLink.href, // Fresh link that won't 404
+            timestamp: item.timestamp
+          };
+        } catch (error) {
+          console.error('Error generating file link:', error);
+          return null;
+        }
+      })
+    );
+    
+    // Filter out any failed items
+    const validMedia = mediaWithFreshLinks.filter(item => item !== null);
+    
+    res.json({
+      eventId,
+      media: validMedia,
+      count: validMedia.length
+    });
+    
+  } catch (error) {
+    console.error('API error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
-  
-  res.json(eventData);
 });
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'Event Media Bot Backend is running',
+    message: 'Server is running',
     events: events.size
   });
 });
@@ -175,8 +156,4 @@ app.get('/', (req, res) => {
 // Start server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  console.log(`Set your Telegram webhook to: ${process.env.RENDER_URL}/webhook`);
 });
-
-
-
