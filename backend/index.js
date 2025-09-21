@@ -1,6 +1,8 @@
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -10,6 +12,9 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Serve static files from the 'public' directory
+app.use('/media', express.static(path.join(__dirname, 'public')));
+
 // Initialize Telegram Bot
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: false });
@@ -18,7 +23,39 @@ const bot = new TelegramBot(token, { polling: false });
 const events = new Map();
 const userStates = new Map();
 
-// Webhook handler - FIXED: Removed handleCommand reference
+// ADD PROXY ENDPOINT RIGHT HERE - AFTER MIDDLEWARE, BEFORE WEBHOOK
+app.get('/proxy', async (req, res) => {
+  try {
+    const { url, type } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter required' });
+    }
+    
+    // Fetch the media from Telegram
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      return res.status(404).send('Media not found');
+    }
+    
+    // Set appropriate content type
+    if (type === 'photo') {
+      res.set('Content-Type', 'image/jpeg');
+    } else if (type === 'video') {
+      res.set('Content-Type', 'video/mp4');
+    }
+    
+    // Stream the media through your server
+    response.body.pipe(res);
+    
+  } catch (error) {
+    console.error('Proxy error:', error);
+    res.status(500).send('Error fetching media');
+  }
+});
+
+// Webhook handler
 app.post('/webhook', async (req, res) => {
   try {
     const update = req.body;
@@ -118,7 +155,7 @@ app.get('/api/event/:eventId', async (req, res) => {
           const fileLink = await bot.getFileLink(item.file_id);
           return {
             type: item.type,
-            file_path: fileLink.href,
+            file_path: fileLink.href, // This is the Telegram CDN link
             timestamp: item.timestamp
           };
         } catch (error) {
@@ -166,4 +203,8 @@ app.post('/set-webhook', async (req, res) => {
 // Start server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  // Create public directory if it doesn't exist
+  if (!fs.existsSync(path.join(__dirname, 'public'))) {
+    fs.mkdirSync(path.join(__dirname, 'public'), { recursive: true });
+  }
 });
