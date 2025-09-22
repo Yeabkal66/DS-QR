@@ -1,24 +1,21 @@
+const fetch = require('node-fetch');
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const cors = require('cors');
-const fetch = require('node-fetch'); // ADD THIS LINE
+require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Initialize Telegram Bot
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: false });
 
-// In-memory storage
 const events = new Map();
 const userStates = new Map();
 
-// ADD THIS PROXY ENDPOINT - CRITICAL FOR MEDIA VISIBILITY
 app.get('/proxy-media', async (req, res) => {
     try {
         const { url, type } = req.query;
@@ -27,21 +24,18 @@ app.get('/proxy-media', async (req, res) => {
             return res.status(400).json({ error: 'URL parameter required' });
         }
         
-        // Fetch from Telegram's CDN
         const response = await fetch(url);
         
         if (!response.ok) {
             return res.status(404).send('Media not found');
         }
         
-        // Set appropriate headers
         if (type === 'photo') {
             res.set('Content-Type', 'image/jpeg');
         } else if (type === 'video') {
             res.set('Content-Type', 'video/mp4');
         }
         
-        // Stream the media
         response.body.pipe(res);
         
     } catch (error) {
@@ -50,7 +44,6 @@ app.get('/proxy-media', async (req, res) => {
     }
 });
 
-// Webhook handler
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
@@ -119,7 +112,6 @@ They'll be able to view all ${eventData.media.length} media items.`);
     }
 });
 
-// API to get event media - USE PROXY LINKS
 app.get('/api/event/:eventId', async (req, res) => {
     try {
         const { eventId } = req.params;
@@ -129,17 +121,15 @@ app.get('/api/event/:eventId', async (req, res) => {
             return res.status(404).json({ error: 'Event not found' });
         }
         
-        // Generate proxy links instead of direct Telegram links
         const mediaWithProxyLinks = await Promise.all(
             eventData.media.map(async (item) => {
                 try {
                     const fileLink = await bot.getFileLink(item.file_id);
-                    // Use proxy endpoint instead of direct Telegram URL
                     const proxyUrl = `${process.env.RENDER_URL}/proxy-media?url=${encodeURIComponent(fileLink.href)}&type=${item.type}`;
                     
                     return {
                         type: item.type,
-                        file_path: proxyUrl, // Use proxy URL instead of direct Telegram URL
+                        file_path: proxyUrl,
                         timestamp: item.timestamp
                     };
                 } catch (error) {
@@ -163,7 +153,6 @@ app.get('/api/event/:eventId', async (req, res) => {
     }
 });
 
-// Health check
 app.get('/', (req, res) => {
     res.json({ status: 'OK', message: 'Server is running', events: events.size });
 });
