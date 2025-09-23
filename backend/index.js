@@ -17,12 +17,11 @@ const events = new Map();
 const userStates = new Map();
 
 app.get('/proxy-media', async (req, res) => {
-    try {
-        const { url, type } = req.query;
-        
-        if (!url) {
-            return res.status(400).json({ error: 'URL parameter required' });
-        }
+    const { url, type } = req.query;
+    
+    if (!url || url === 'undefined') {
+        return res.status(400).send('Invalid media URL');
+    }
         
         const response = await fetch(url);
         
@@ -125,7 +124,7 @@ app.get('/api/event/:eventId', async (req, res) => {
             eventData.media.map(async (item) => {
                 try {
                     const fileLink = await bot.getFileLink(item.file_id);
-                    const proxyUrl = `${process.env.RENDER_URL}/proxy-media?url=${encodeURIComponent(fileLink.href)}&type=${item.type}`;
+const proxyUrl = `${process.env.RENDER_URL}/proxy-media?url=${encodeURIComponent(fileLink)}&type=${item.type}`;
                     
                     return {
                         type: item.type,
@@ -160,3 +159,4 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
+
