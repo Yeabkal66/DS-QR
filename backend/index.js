@@ -1,7 +1,8 @@
-const fetch = require('node-fetch');
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const cors = require('cors');
+const { google } = require('googleapis');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -16,33 +17,50 @@ const bot = new TelegramBot(token, { polling: false });
 const events = new Map();
 const userStates = new Map();
 
-app.get('/proxy-media', async (req, res) => {
-    const { url, type } = req.query;
-    
-    if (!url || url === 'undefined') {
-        return res.status(400).send('Invalid media URL');
-    }
-        
-        const response = await fetch(url);
-        
-        if (!response.ok) {
-            return res.status(404).send('Media not found');
-        }
-        
-        if (type === 'photo') {
-            res.set('Content-Type', 'image/jpeg');
-        } else if (type === 'video') {
-            res.set('Content-Type', 'video/mp4');
-        }
-        
-        response.body.pipe(res);
-        
-    } catch (error) {
-        console.error('Proxy error:', error);
-        res.status(500).send('Error fetching media');
-    }
+// Google Drive Setup
+const auth = new google.auth.GoogleAuth({
+    keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEYFILE,
+    scopes: ['https://www.googleapis.com/auth/drive.file']
 });
 
+const drive = google.drive({ version: 'v3', auth });
+
+// Upload to Google Drive
+async function uploadToDrive(fileBuffer, fileName, mimeType) {
+    try {
+        const fileMetadata = {
+            name: fileName,
+            parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
+        };
+
+        const media = {
+            mimeType: mimeType,
+            body: fileBuffer
+        };
+
+        const response = await drive.files.create({
+            resource: fileMetadata,
+            media: media,
+            fields: 'id, webViewLink, webContentLink'
+        });
+
+        // Make file publicly accessible
+        await drive.permissions.create({
+            fileId: response.data.id,
+            requestBody: {
+                role: 'reader',
+                type: 'anyone'
+            }
+        });
+
+        return response.data.webContentLink; // Public download URL
+    } catch (error) {
+        console.error('Google Drive upload error:', error);
+        throw error;
+    }
+}
+
+// Webhook handler
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
@@ -83,22 +101,40 @@ They'll be able to view all ${eventData.media.length} media items.`);
                     await bot.sendMessage(chatId, 'Please start an event first with /start');
                 } else {
                     const eventData = events.get(userState.eventId);
-                    let fileId;
                     
-                    if (update.message.photo) {
-                        fileId = update.message.photo[update.message.photo.length - 1].file_id;
-                    } else if (update.message.video) {
-                        fileId = update.message.video.file_id;
-                    }
-                    
-                    if (fileId) {
+                    try {
+                        // Get file from Telegram
+                        const fileId = update.message.photo 
+                            ? update.message.photo[update.message.photo.length - 1].file_id
+                            : update.message.video.file_id;
+                        
+                        const fileLink = await bot.getFileLink(fileId);
+                        
+                        // Download file from Telegram
+                        const response = await fetch(fileLink);
+                        const fileBuffer = await response.buffer();
+                        
+                        // Determine file type and name
+                        const isPhoto = update.message.photo ? true : false;
+                        const fileExtension = isPhoto ? 'jpg' : 'mp4';
+                        const mimeType = isPhoto ? 'image/jpeg' : 'video/mp4';
+                        const fileName = `event-${userState.eventId}-${Date.now()}.${fileExtension}`;
+                        
+                        // Upload to Google Drive
+                        const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
+                        
+                        // Store Google Drive URL
                         eventData.media.push({
-                            file_id: fileId,
-                            type: update.message.photo ? 'photo' : 'video',
+                            type: isPhoto ? 'photo' : 'video',
+                            file_path: driveUrl,
                             timestamp: new Date()
                         });
                         
                         await bot.sendMessage(chatId, `✅ Media added to your event!`);
+                        
+                    } catch (error) {
+                        console.error('Media processing error:', error);
+                        await bot.sendMessage(chatId, '❌ Failed to process media. Please try again.');
                     }
                 }
             }
@@ -111,6 +147,7 @@ They'll be able to view all ${eventData.media.length} media items.`);
     }
 });
 
+// API to get event media
 app.get('/api/event/:eventId', async (req, res) => {
     try {
         const { eventId } = req.params;
@@ -120,30 +157,10 @@ app.get('/api/event/:eventId', async (req, res) => {
             return res.status(404).json({ error: 'Event not found' });
         }
         
-        const mediaWithProxyLinks = await Promise.all(
-            eventData.media.map(async (item) => {
-                try {
-                    const fileLink = await bot.getFileLink(item.file_id);
-const proxyUrl = `${process.env.RENDER_URL}/proxy-media?url=${encodeURIComponent(fileLink)}&type=${item.type}`;
-                    
-                    return {
-                        type: item.type,
-                        file_path: proxyUrl,
-                        timestamp: item.timestamp
-                    };
-                } catch (error) {
-                    console.error('Error generating file link:', error);
-                    return null;
-                }
-            })
-        );
-        
-        const validMedia = mediaWithProxyLinks.filter(item => item !== null);
-        
         res.json({
             eventId,
-            media: validMedia,
-            count: validMedia.length
+            media: eventData.media,
+            count: eventData.media.length
         });
         
     } catch (error) {
@@ -159,4 +176,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
-
