@@ -2,7 +2,7 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const cors = require('cors');
 const { google } = require('googleapis');
-const fs = require('fs');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -19,7 +19,7 @@ const userStates = new Map();
 
 // Google Drive Setup
 const auth = new google.auth.GoogleAuth({
-    keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEYFILE,
+    credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEYFILE),
     scopes: ['https://www.googleapis.com/auth/drive.file']
 });
 
@@ -27,115 +27,79 @@ const drive = google.drive({ version: 'v3', auth });
 
 // Upload to Google Drive
 async function uploadToDrive(fileBuffer, fileName, mimeType) {
-    try {
-        const fileMetadata = {
-            name: fileName,
-            parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
-        };
+    const fileMetadata = {
+        name: fileName,
+        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
+    };
 
-        const media = {
-            mimeType: mimeType,
-            body: fileBuffer
-        };
+    const media = {
+        mimeType: mimeType,
+        body: fileBuffer
+    };
 
-        const response = await drive.files.create({
-            resource: fileMetadata,
-            media: media,
-            fields: 'id, webViewLink, webContentLink'
-        });
+    const response = await drive.files.create({
+        resource: fileMetadata,
+        media: media,
+        fields: 'id, webContentLink'
+    });
 
-        // Make file publicly accessible
-        await drive.permissions.create({
-            fileId: response.data.id,
-            requestBody: {
-                role: 'reader',
-                type: 'anyone'
-            }
-        });
+    await drive.permissions.create({
+        fileId: response.data.id,
+        requestBody: {
+            role: 'reader',
+            type: 'anyone'
+        }
+    });
 
-        return response.data.webContentLink; // Public download URL
-    } catch (error) {
-        console.error('Google Drive upload error:', error);
-        throw error;
-    }
+    return response.data.webContentLink;
 }
 
-// Webhook handler
+// Webhook handler - FIXED
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
         
-        if (update.message) {
+        if (update.message && (update.message.photo || update.message.video)) {
             const chatId = update.message.chat.id;
-            const text = update.message.text || '';
+            const userState = userStates.get(chatId);
             
-            if (text === '/start' || text === '/start@yourbottoken') {
-                const eventId = 'event-' + Date.now();
-                events.set(eventId, { media: [], createdAt: new Date() });
-                userStates.set(chatId, { eventId, state: 'awaiting_media' });
+            if (!userState) {
+                await bot.sendMessage(chatId, 'Please start an event first with /start');
+            } else {
+                const eventData = events.get(userState.eventId);
                 
-                await bot.sendMessage(chatId, `🎉 New event created! 
-Event ID: ${eventId}
-Send me photos and videos now. When you're done, send /done to get your shareable link.`);
-            } 
-            else if (text === '/done' || text === '/done@yourbottoken') {
-                const userState = userStates.get(chatId);
-                
-                if (!userState || !userState.eventId) {
-                    await bot.sendMessage(chatId, 'Please start an event first with /start');
-                } else {
-                    const eventData = events.get(userState.eventId);
-                    const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
+                try {
+                    // Get file from Telegram
+                    const fileId = update.message.photo 
+                        ? update.message.photo[update.message.photo.length - 1].file_id
+                        : update.message.video.file_id;
                     
-                    await bot.sendMessage(chatId, `✅ Your event is ready!
-Share this link with your guests: ${eventLink}
-They'll be able to view all ${eventData.media.length} media items.`);
+                    const fileLink = await bot.getFileLink(fileId);
                     
-                    userStates.delete(chatId);
-                }
-            }
-            else if (update.message.photo || update.message.video) {
-                const userState = userStates.get(chatId);
-                
-                if (!userState) {
-                    await bot.sendMessage(chatId, 'Please start an event first with /start');
-                } else {
-                    const eventData = events.get(userState.eventId);
+                    // FIX: Use axios to download file
+                    const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
+                    const fileBuffer = Buffer.from(response.data);
                     
-                    try {
-                        // Get file from Telegram
-                        const fileId = update.message.photo 
-                            ? update.message.photo[update.message.photo.length - 1].file_id
-                            : update.message.video.file_id;
-                        
-                        const fileLink = await bot.getFileLink(fileId);
-                        
-                        // Download file from Telegram
-                        const response = await fetch(fileLink);
-                        const fileBuffer = await response.buffer();
-                        
-                        // Determine file type and name
-                        const isPhoto = update.message.photo ? true : false;
-                        const fileExtension = isPhoto ? 'jpg' : 'mp4';
-                        const mimeType = isPhoto ? 'image/jpeg' : 'video/mp4';
-                        const fileName = `event-${userState.eventId}-${Date.now()}.${fileExtension}`;
-                        
-                        // Upload to Google Drive
-                        const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
-                        
-                        // Store Google Drive URL
-                        eventData.media.push({
-                            type: isPhoto ? 'photo' : 'video',
-                            file_path: driveUrl,
-                            timestamp: new Date()
-                        });
-                        
-                        await bot.sendMessage(chatId, `✅ Media added to your event!`);
-                        
-                    } catch (error) {
-                        console.error('Media processing error:', error);
-                        await bot.sendMessage(chatId, '❌ Failed to process media. Please try again.');
-                    }
+                    // Upload to Google Drive
+                    const isPhoto = !!update.message.photo;
+                    const fileExtension = isPhoto ? 'jpg' : 'mp4';
+                    const mimeType = isPhoto ? 'image/jpeg' : 'video/mp4';
+                    const fileName = `event-${userState.eventId}-${Date.now()}.${fileExtension}`;
+                    
+                    const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
+                    
+                    // Store Google Drive URL
+                    eventData.media.push({
+                        type: isPhoto ? 'photo' : 'video',
+                        file_path: driveUrl,
+                        timestamp: new Date()
+                    });
+                    
+                    await bot.sendMessage(chatId, `✅ Media added to your event!`);
+                    
+                } catch (error) {
+                    console.error('Media processing error:', error);
+                    await bot.sendMessage(chatId, '❌ Failed to process media. Please try again.');
                 }
             }
         }
@@ -147,32 +111,53 @@ They'll be able to view all ${eventData.media.length} media items.`);
     }
 });
 
-// API to get event media
-app.get('/api/event/:eventId', async (req, res) => {
+// Add command handlers
+app.post('/webhook', async (req, res) => {
     try {
-        const { eventId } = req.params;
-        const eventData = events.get(eventId);
+        const update = req.body;
         
-        if (!eventData) {
-            return res.status(404).json({ error: 'Event not found' });
+        if (update.message) {
+            const chatId = update.message.chat.id;
+            const text = update.message.text || '';
+            
+            if (text === '/start') {
+                const eventId = 'event-' + Date.now();
+                events.set(eventId, { media: [], createdAt: new Date() });
+                userStates.set(chatId, { eventId, state: 'awaiting_media' });
+                await bot.sendMessage(chatId, `🎉 New event created! Event ID: ${eventId}`);
+            } 
+            else if (text === '/done') {
+                const userState = userStates.get(chatId);
+                if (userState) {
+                    const eventData = events.get(userState.eventId);
+                    const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
+                    await bot.sendMessage(chatId, `✅ Event ready! Share: ${eventLink}`);
+                    userStates.delete(chatId);
+                }
+            }
         }
         
-        res.json({
-            eventId,
-            media: eventData.media,
-            count: eventData.media.length
-        });
-        
+        res.sendStatus(200);
     } catch (error) {
-        console.error('API error:', error);
+        res.sendStatus(200);
+    }
+});
+
+// Keep other endpoints same
+app.get('/api/event/:eventId', async (req, res) => {
+    try {
+        const eventData = events.get(req.params.eventId);
+        if (!eventData) return res.status(404).json({ error: 'Event not found' });
+        res.json({ eventId: req.params.eventId, media: eventData.media });
+    } catch (error) {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'OK', message: 'Server is running', events: events.size });
+    res.json({ status: 'OK', message: 'Server is running' });
 });
 
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
-});
+});                           
