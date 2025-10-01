@@ -54,110 +54,122 @@ async function uploadToDrive(fileBuffer, fileName, mimeType) {
     return response.data.webContentLink;
 }
 
-// Webhook handler - FIXED
+// SINGLE Webhook handler - handles both commands and media
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
-        
-        if (update.message && (update.message.photo || update.message.video)) {
-            const chatId = update.message.chat.id;
-            const userState = userStates.get(chatId);
-            
-            if (!userState) {
-                await bot.sendMessage(chatId, 'Please start an event first with /start');
-            } else {
-                const eventData = events.get(userState.eventId);
-                
-                try {
-                    // Get file from Telegram
-                    const fileId = update.message.photo 
-                        ? update.message.photo[update.message.photo.length - 1].file_id
-                        : update.message.video.file_id;
-                    
-                    const fileLink = await bot.getFileLink(fileId);
-                    
-                    // FIX: Use axios to download file
-                    const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
-                    const fileBuffer = Buffer.from(response.data);
-                    
-                    // Upload to Google Drive
-                    const isPhoto = !!update.message.photo;
-                    const fileExtension = isPhoto ? 'jpg' : 'mp4';
-                    const mimeType = isPhoto ? 'image/jpeg' : 'video/mp4';
-                    const fileName = `event-${userState.eventId}-${Date.now()}.${fileExtension}`;
-                    
-                    const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
-                    
-                    // Store Google Drive URL
-                    eventData.media.push({
-                        type: isPhoto ? 'photo' : 'video',
-                        file_path: driveUrl,
-                        timestamp: new Date()
-                    });
-                    
-                    await bot.sendMessage(chatId, `✅ Media added to your event!`);
-                    
-                } catch (error) {
-                    console.error('Media processing error:', error);
-                    await bot.sendMessage(chatId, '❌ Failed to process media. Please try again.');
-                }
-            }
-        }
-        
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('Webhook error:', error);
-        res.sendStatus(200);
-    }
-});
-
-// Add command handlers
-app.post('/webhook', async (req, res) => {
-    try {
-        const update = req.body;
+        console.log('📨 Webhook received');
         
         if (update.message) {
             const chatId = update.message.chat.id;
             const text = update.message.text || '';
             
+            // Handle commands
             if (text === '/start') {
+                console.log('🔄 /start command received');
                 const eventId = 'event-' + Date.now();
                 events.set(eventId, { media: [], createdAt: new Date() });
                 userStates.set(chatId, { eventId, state: 'awaiting_media' });
-                await bot.sendMessage(chatId, `🎉 New event created! Event ID: ${eventId}`);
+                await bot.sendMessage(chatId, `🎉 New event created! Event ID: ${eventId}\n\nSend me photos and videos now. When you're done, send /done to get your shareable link.`);
+                console.log('✅ Event created:', eventId);
             } 
             else if (text === '/done') {
+                console.log('✅ /done command received');
                 const userState = userStates.get(chatId);
                 if (userState) {
                     const eventData = events.get(userState.eventId);
                     const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
-                    await bot.sendMessage(chatId, `✅ Event ready! Share: ${eventLink}`);
+                    await bot.sendMessage(chatId, `✅ Your event is ready!\n\nShare this link with your guests:\n${eventLink}\n\nThey'll be able to view all ${eventData.media.length} media items.`);
                     userStates.delete(chatId);
+                    console.log('✅ Event finalized:', userState.eventId);
+                } else {
+                    await bot.sendMessage(chatId, '❌ Please start an event first with /start');
+                }
+            }
+            // Handle media
+            else if (update.message.photo || update.message.video) {
+                console.log('📸 Media received');
+                const userState = userStates.get(chatId);
+                
+                if (!userState) {
+                    await bot.sendMessage(chatId, '❌ Please start an event first with /start');
+                } else {
+                    const eventData = events.get(userState.eventId);
+                    
+                    try {
+                        // Get file from Telegram
+                        const fileId = update.message.photo 
+                            ? update.message.photo[update.message.photo.length - 1].file_id
+                            : update.message.video.file_id;
+                        
+                        console.log('📄 Downloading file from Telegram...');
+                        const fileLink = await bot.getFileLink(fileId);
+                        
+                        // Download file using axios
+                        const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
+                        const fileBuffer = Buffer.from(response.data);
+                        console.log('✅ File downloaded, size:', fileBuffer.length);
+                        
+                        // Upload to Google Drive
+                        const isPhoto = !!update.message.photo;
+                        const fileExtension = isPhoto ? 'jpg' : 'mp4';
+                        const mimeType = isPhoto ? 'image/jpeg' : 'video/mp4';
+                        const fileName = `event-${userState.eventId}-${Date.now()}.${fileExtension}`;
+                        
+                        console.log('🚀 Uploading to Google Drive...');
+                        const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
+                        console.log('✅ Uploaded to Google Drive:', driveUrl);
+                        
+                        // Store Google Drive URL
+                        eventData.media.push({
+                            type: isPhoto ? 'photo' : 'video',
+                            file_path: driveUrl,
+                            timestamp: new Date()
+                        });
+                        
+                        await bot.sendMessage(chatId, `✅ Media added to your event!`);
+                        console.log('✅ Media processed successfully');
+                        
+                    } catch (error) {
+                        console.error('❌ Media processing error:', error.message);
+                        await bot.sendMessage(chatId, '❌ Failed to process media. Please try again.');
+                    }
                 }
             }
         }
         
         res.sendStatus(200);
     } catch (error) {
+        console.error('💥 Webhook error:', error);
         res.sendStatus(200);
     }
 });
 
-// Keep other endpoints same
+// API to get event media
 app.get('/api/event/:eventId', async (req, res) => {
     try {
         const eventData = events.get(req.params.eventId);
         if (!eventData) return res.status(404).json({ error: 'Event not found' });
-        res.json({ eventId: req.params.eventId, media: eventData.media });
+        res.json({ 
+            eventId: req.params.eventId, 
+            media: eventData.media,
+            count: eventData.media.length 
+        });
     } catch (error) {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
+// Health check
 app.get('/', (req, res) => {
-    res.json({ status: 'OK', message: 'Server is running' });
+    res.json({ 
+        status: 'OK', 
+        message: 'Server is running',
+        events: events.size,
+        userStates: userStates.size
+    });
 });
 
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});                           
+    console.log(`🚀 Server running on port ${port}`);
+});                   
