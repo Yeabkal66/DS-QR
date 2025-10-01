@@ -25,36 +25,44 @@ const auth = new google.auth.GoogleAuth({
 
 const drive = google.drive({ version: 'v3', auth });
 
-// Upload to Google Drive
+// FIXED: Upload to Google Drive without piping
 async function uploadToDrive(fileBuffer, fileName, mimeType) {
-    const fileMetadata = {
-        name: fileName,
-        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
-    };
+    try {
+        const fileMetadata = {
+            name: fileName,
+            parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
+        };
 
-    const media = {
-        mimeType: mimeType,
-        body: fileBuffer
-    };
+        // FIX: Create a proper media object for buffer upload
+        const media = {
+            mimeType: mimeType,
+            body: fileBuffer
+        };
 
-    const response = await drive.files.create({
-        resource: fileMetadata,
-        media: media,
-        fields: 'id, webContentLink'
-    });
+        const response = await drive.files.create({
+            resource: fileMetadata,
+            media: media,
+            fields: 'id, webContentLink'
+        });
 
-    await drive.permissions.create({
-        fileId: response.data.id,
-        requestBody: {
-            role: 'reader',
-            type: 'anyone'
-        }
-    });
+        // Make file public
+        await drive.permissions.create({
+            fileId: response.data.id,
+            requestBody: {
+                role: 'reader',
+                type: 'anyone'
+            }
+        });
 
-    return response.data.webContentLink;
+        return response.data.webContentLink;
+        
+    } catch (error) {
+        console.error('Google Drive upload error:', error);
+        throw error;
+    }
 }
 
-// SINGLE Webhook handler - handles both commands and media
+// Webhook handler
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
@@ -64,14 +72,12 @@ app.post('/webhook', async (req, res) => {
             const chatId = update.message.chat.id;
             const text = update.message.text || '';
             
-            // Handle commands
             if (text === '/start') {
                 console.log('🔄 /start command received');
                 const eventId = 'event-' + Date.now();
                 events.set(eventId, { media: [], createdAt: new Date() });
                 userStates.set(chatId, { eventId, state: 'awaiting_media' });
                 await bot.sendMessage(chatId, `🎉 New event created! Event ID: ${eventId}\n\nSend me photos and videos now. When you're done, send /done to get your shareable link.`);
-                console.log('✅ Event created:', eventId);
             } 
             else if (text === '/done') {
                 console.log('✅ /done command received');
@@ -81,12 +87,8 @@ app.post('/webhook', async (req, res) => {
                     const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
                     await bot.sendMessage(chatId, `✅ Your event is ready!\n\nShare this link with your guests:\n${eventLink}\n\nThey'll be able to view all ${eventData.media.length} media items.`);
                     userStates.delete(chatId);
-                    console.log('✅ Event finalized:', userState.eventId);
-                } else {
-                    await bot.sendMessage(chatId, '❌ Please start an event first with /start');
                 }
             }
-            // Handle media
             else if (update.message.photo || update.message.video) {
                 console.log('📸 Media received');
                 const userState = userStates.get(chatId);
@@ -105,7 +107,7 @@ app.post('/webhook', async (req, res) => {
                         console.log('📄 Downloading file from Telegram...');
                         const fileLink = await bot.getFileLink(fileId);
                         
-                        // Download file using axios
+                        // Download file
                         const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
                         const fileBuffer = Buffer.from(response.data);
                         console.log('✅ File downloaded, size:', fileBuffer.length);
@@ -120,7 +122,7 @@ app.post('/webhook', async (req, res) => {
                         const driveUrl = await uploadToDrive(fileBuffer, fileName, mimeType);
                         console.log('✅ Uploaded to Google Drive:', driveUrl);
                         
-                        // Store Google Drive URL
+                        // Store URL
                         eventData.media.push({
                             type: isPhoto ? 'photo' : 'video',
                             file_path: driveUrl,
@@ -128,7 +130,6 @@ app.post('/webhook', async (req, res) => {
                         });
                         
                         await bot.sendMessage(chatId, `✅ Media added to your event!`);
-                        console.log('✅ Media processed successfully');
                         
                     } catch (error) {
                         console.error('❌ Media processing error:', error.message);
@@ -160,16 +161,10 @@ app.get('/api/event/:eventId', async (req, res) => {
     }
 });
 
-// Health check
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        message: 'Server is running',
-        events: events.size,
-        userStates: userStates.size
-    });
+    res.json({ status: 'OK', message: 'Server is running' });
 });
 
 app.listen(port, () => {
     console.log(`🚀 Server running on port ${port}`);
-});                   
+});
