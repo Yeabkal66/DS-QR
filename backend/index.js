@@ -48,87 +48,120 @@ app.post('/webhook', async (req, res) => {
       
       if (text === '/start') {
         const eventId = 'event-' + Date.now();
-        events.set(eventId, { media: [], createdAt: new Date() });
-        userStates.set(chatId, { eventId, state: 'awaiting_media' });
+        events.set(eventId, { 
+          media: [], 
+          createdAt: new Date(),
+          title: 'Event Gallery' // ADDED: Default title
+        });
+        userStates.set(chatId, { 
+          eventId, 
+          state: 'awaiting_title' // CHANGED: Now asks for title first
+        });
         
-        await bot.sendMessage(chatId, `🎉 New event created!
-
-📝 Event ID: ${eventId}
-
-You can now:
-📤 Send photos/videos directly to me (for files <50MB)
-🔗 OR send Cloudinary URLs (for large files >50MB)
-
-✅ When finished, send /done to get your gallery link`);
+        await bot.sendMessage(chatId, `🎉 New event created!\n\n📝 Please send me the title for your event gallery:\n(What should appear at the top of the page?)`);
       } 
+      
+      // ADDED: Title handling
+      else if (userStates.get(chatId)?.state === 'awaiting_title') {
+        const userState = userStates.get(chatId);
+        const eventData = events.get(userState.eventId);
+        
+        // Save the custom title
+        eventData.title = text;
+        
+        // Change state to accept media
+        userState.state = 'awaiting_urls';
+        
+        await bot.sendMessage(chatId, `✅ Title set: "${text}"\n\n📁 Now you can:\n• Send photos/videos directly\n• Or send file URLs from cloud storage\n\n✅ Send /done when finished`);
+      }
+      
       else if (text === '/done') {
         const userState = userStates.get(chatId);
         if (userState) {
           const eventData = events.get(userState.eventId);
-          const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}`;
-          await bot.sendMessage(chatId, `✅ Your event is ready!
-
-📊 Total media: ${eventData.media.length} items
-🔗 Share this link with guests:
-${eventLink}
-
-They can view all your uploaded media!`);
+          
+          // ADDED: Show final upload summary
+          if (userState.uploadCount) {
+            await bot.sendMessage(chatId, 
+              `📊 Final Upload Summary:\n✅ Successful: ${userState.uploadCount.success}\n❌ Failed: ${userState.uploadCount.failed}`
+            );
+          }
+          
+          // UPDATED: Include title in the link
+          const eventLink = `${process.env.FRONTEND_URL}?event=${userState.eventId}&title=${encodeURIComponent(eventData.title)}`;
+          await bot.sendMessage(chatId, `✅ Your event "${eventData.title}" is ready!\n\n🔗 Share: ${eventLink}`);
           userStates.delete(chatId);
         }
       }
-      // METHOD 1: Handle direct media uploads (<50MB)
-      else if (update.message.photo || update.message.video) {
+      
+      // METHOD 1 & 2 COMBINED: Handle both direct media and URLs with batch confirmation
+      else if (update.message.photo || update.message.video || text.startsWith('http')) {
         const userState = userStates.get(chatId);
-        if (userState) {
+        
+        if (userState && userState.state === 'awaiting_urls') {
           const eventData = events.get(userState.eventId);
+          
+          // ADDED: Initialize counters if they don't exist
+          if (!userState.uploadCount) {
+            userState.uploadCount = { success: 0, failed: 0 };
+          }
           
           try {
-            const fileId = update.message.photo 
-              ? update.message.photo[update.message.photo.length - 1].file_id
-              : update.message.video.file_id;
+            let fileUrl;
+            let mediaType;
             
-            const fileLink = await bot.getFileLink(fileId);
-            const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
-            const fileBuffer = Buffer.from(response.data);
+            // Handle direct media upload
+            if (update.message.photo || update.message.video) {
+              const fileId = update.message.photo 
+                ? update.message.photo[update.message.photo.length - 1].file_id
+                : update.message.video.file_id;
+              
+              const fileLink = await bot.getFileLink(fileId);
+              const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
+              const fileBuffer = Buffer.from(response.data);
+              
+              const isPhoto = !!update.message.photo;
+              const resourceType = isPhoto ? 'image' : 'video';
+              fileUrl = await uploadToCloudinary(fileBuffer, resourceType);
+              mediaType = isPhoto ? 'photo' : 'video';
+              
+              userState.uploadCount.success++;
+              
+            } 
+            // Handle manual URLs
+            else if (text.startsWith('http')) {
+              // Simple URL validation
+              if (text.includes('cloudinary.com') || text.includes('res.cloudinary.com')) {
+                const isVideo = text.includes('/video/') || text.includes('.mp4') || text.includes('.mov');
+                
+                fileUrl = text;
+                mediaType = isVideo ? 'video' : 'photo';
+                userState.uploadCount.success++;
+              } else {
+                userState.uploadCount.failed++;
+                throw new Error('Invalid Cloudinary URL');
+              }
+            }
             
-            const isPhoto = !!update.message.photo;
-            const resourceType = isPhoto ? 'image' : 'video';
-            const cloudinaryUrl = await uploadToCloudinary(fileBuffer, resourceType);
-            
+            // Add to event
             eventData.media.push({
-              type: isPhoto ? 'photo' : 'video',
-              file_path: cloudinaryUrl,
+              type: mediaType,
+              file_path: fileUrl,
               timestamp: new Date(),
-              source: 'telegram'
+              source: mediaType === 'manual' ? 'manual' : 'telegram'
             });
             
-            await bot.sendMessage(chatId, `✅ Media uploaded via Telegram!`);
+            // ADDED: Send batch confirmation every 5 files
+            const totalProcessed = userState.uploadCount.success + userState.uploadCount.failed;
+            if (totalProcessed % 5 === 0) {
+              await bot.sendMessage(chatId, 
+                `📊 Upload Progress:\n✅ Successful: ${userState.uploadCount.success}\n❌ Failed: ${userState.uploadCount.failed}`
+              );
+            }
             
           } catch (error) {
-            await bot.sendMessage(chatId, '❌ Failed to process media. Try manual upload for large files.');
-          }
-        }
-      }
-      // METHOD 2: Handle manual Cloudinary URLs (>50MB)
-      else if (text.startsWith('http')) {
-        const userState = userStates.get(chatId);
-        if (userState) {
-          const eventData = events.get(userState.eventId);
-          
-          // Simple URL validation
-          if (text.includes('cloudinary.com') || text.includes('res.cloudinary.com')) {
-            const isVideo = text.includes('/video/') || text.includes('.mp4') || text.includes('.mov');
-            
-            eventData.media.push({
-              type: isVideo ? 'video' : 'photo',
-              file_path: text,
-              timestamp: new Date(),
-              source: 'manual'
-            });
-            
-            await bot.sendMessage(chatId, `✅ Manual Cloudinary URL added!`);
-          } else {
-            await bot.sendMessage(chatId, '❌ Please send a valid Cloudinary URL');
+            userState.uploadCount.failed++;
+            // REMOVED: Individual error messages to reduce spam
           }
         }
       }
@@ -144,7 +177,11 @@ They can view all your uploaded media!`);
 app.get('/api/event/:eventId', async (req, res) => {
   const eventData = events.get(req.params.eventId);
   if (!eventData) return res.status(404).json({ error: 'Event not found' });
-  res.json({ eventId: req.params.eventId, media: eventData.media });
+  res.json({ 
+    eventId: req.params.eventId, 
+    media: eventData.media,
+    title: eventData.title // ADDED: Include title in API response
+  });
 });
 
 app.get('/', (req, res) => {
@@ -152,5 +189,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`🚀 Hybrid system running on port ${port}`);
-});
+  console.log(`🚀 Enhanced system running on port ${port}`);
+}); 
