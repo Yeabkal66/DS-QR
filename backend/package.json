@@ -1,4 +1,12 @@
 {
+  "name": "event-media-bot-backend",
+  "version": "1.0.0",
+  "description": "Backend for Telegram event media sharing system",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "node-telegram-bot-api": "^0.61.0",
@@ -7,6 +15,10 @@
     "axios": "^1.6.0",
     "dotenv": "^16.3.1",
     "mongodb": "^5.8.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
+
 
